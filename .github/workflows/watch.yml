@@ -1,0 +1,54 @@
+name: CGV 치이카와 예매 감시
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: Telegram 테스트 알림만 보내기
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cgv-chiikawa-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: 이전 알림 기록 복원
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: cgv-state-${{ github.run_id }}
+          restore-keys: |
+            cgv-state-
+
+      - name: 감시 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHECK_INTERVAL_SECONDS: "60"
+          LOOP_MINUTES: "340"
+        run: |
+          if [ "${{ inputs.test_alert }}" = "true" ]; then
+            python check.py --test-alert
+          else
+            python check.py
+          fi
