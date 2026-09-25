@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import importlib
 import os
 import re
 import sys
@@ -16,6 +17,26 @@ MOVIE_NAME = "극장판 치이카와-인어 섬의 비밀"
 START_DATE = date(2026, 9, 30)
 DISCOVERY_DAYS = 60
 MAX_SHOWTIME_REQUESTS = 25
+CANCELLATION_ALERTS = os.environ.get("CANCELLATION_ALERTS", "true").lower() == "true"
+CANCEL_WATCH_DATES = {
+    item.strip() for item in os.environ.get("CANCEL_WATCH_DATES", "").split(",") if item.strip()
+}
+CANCEL_WATCH_TIMES = {
+    item.strip().replace(":", "")
+    for item in os.environ.get("CANCEL_WATCH_TIMES", "").split(",")
+    if item.strip()
+}
+CANCEL_WATCH_SITES = {
+    item.strip() for item in os.environ.get("CANCEL_WATCH_SITES", "").split(",") if item.strip()
+}
+PREFERRED_ZONE_ONLY = os.environ.get("PREFERRED_ZONE_ONLY", "false").lower() == "true"
+PREFERRED_ROWS = tuple(
+    item.strip().upper()
+    for item in os.environ.get("PREFERRED_ROWS", "H,I,J").split(",")
+    if item.strip()
+)
+PREFERRED_CENTER_FRACTION = float(os.environ.get("PREFERRED_CENTER_FRACTION", "0.5"))
+SEAT_PROVIDER_MODULE = os.environ.get("SEAT_PROVIDER_MODULE", "").strip()
 SITES = [
     ("0013", "용산아이파크몰"),
     ("0010", "구로"),
@@ -63,6 +84,7 @@ def default_state():
         "discovery_offset": 1,
         "refresh_offset": 0,
         "open_dates": {},
+        "seat_state": {},
     }
 
 
@@ -140,6 +162,52 @@ def fmt_time(value):
     return f"{value[:2]}:{value[2:]}" if len(value) == 4 else value
 
 
+def as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def cancellation_filter_matches(site_no, row):
+    play_date = str(row.get("scnYmd", ""))
+    start_time = str(row.get("scnsrtTm", "")).replace(":", "")
+    if CANCEL_WATCH_SITES and site_no not in CANCEL_WATCH_SITES:
+        return False
+    if CANCEL_WATCH_DATES and play_date not in CANCEL_WATCH_DATES:
+        return False
+    if CANCEL_WATCH_TIMES and start_time not in CANCEL_WATCH_TIMES:
+        return False
+    return True
+
+
+def load_seat_provider():
+    from seat_zone import NoSeatMapProvider
+
+    if not SEAT_PROVIDER_MODULE:
+        return NoSeatMapProvider()
+    module = importlib.import_module(SEAT_PROVIDER_MODULE)
+    factory = getattr(module, "create_provider", None)
+    if not callable(factory):
+        raise RuntimeError(
+            f"{SEAT_PROVIDER_MODULE}.create_provider() 함수가 필요합니다."
+        )
+    return factory()
+
+
+if PREFERRED_ZONE_ONLY:
+    from seat_zone import SeatZonePolicy
+
+    SEAT_PROVIDER = load_seat_provider()
+    SEAT_ZONE_POLICY = SeatZonePolicy(
+        rows=PREFERRED_ROWS,
+        center_fraction=PREFERRED_CENTER_FRACTION,
+    )
+else:
+    SEAT_PROVIDER = None
+    SEAT_ZONE_POLICY = None
+
+
 def send_telegram(text):
     if not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError("GitHub Secrets에 Telegram 토큰 또는 Chat ID가 없습니다.")
@@ -158,6 +226,86 @@ def send_telegram(text):
     )
     if response.status_code >= 400:
         raise RuntimeError(f"Telegram HTTP {response.status_code}: {response.text}")
+
+
+def cancellation_message(site_name, row, previous_free, current_free, zone_seats=None):
+    play_date = display_date(row.get("scnYmd", ""))
+    screen = row.get("expoScnsNm") or row.get("scnsNm") or "상영관"
+    start = fmt_time(row.get("scnsrtTm"))
+    end = fmt_time(row.get("scnendTm"))
+    lines = [
+        "♻️ CGV 취소표/빈자리 발생",
+        "",
+        MOVIE_NAME,
+        f"CGV {site_name}",
+        play_date,
+        f"• {start}–{end} · {screen}",
+    ]
+    if zone_seats is None:
+        lines.append(f"잔여석 {previous_free}석 → {current_free}석")
+    else:
+        labels = ", ".join(seat.label for seat in zone_seats)
+        lines.append(f"선호 구역 빈자리 {len(zone_seats)}석: {labels}")
+    lines.extend(["", "좌석은 다른 사람이 먼저 선택할 수 있으니 바로 확인하세요."])
+    return "\n".join(lines)
+
+
+def track_cancellation_availability(session, site_no, site_name, rows, state):
+    if not CANCELLATION_ALERTS:
+        return 0
+
+    seat_state = state.setdefault("seat_state", {})
+    alerts = 0
+    for row in rows:
+        if not cancellation_filter_matches(site_no, row):
+            continue
+        free = as_int(row.get("frSeatCnt"))
+        if free is None:
+            continue
+
+        key = row_key(site_no, row)
+        previous = seat_state.get(key)
+        entry = dict(previous or {})
+        entry["last_free"] = free
+        entry["ever_sold_out"] = bool(entry.get("ever_sold_out")) or free == 0
+        entry["last_seen"] = datetime.now(KST).isoformat(timespec="seconds")
+
+        if PREFERRED_ZONE_ONLY:
+            seats = SEAT_PROVIDER.fetch_seats(session, site_no, row)
+            if seats is None:
+                entry["zone_status"] = "provider_unavailable"
+                seat_state[key] = entry
+                continue
+            preferred = SEAT_ZONE_POLICY.available_seats(seats)
+            previous_zone_free = entry.get("last_zone_free")
+            current_zone_free = len(preferred)
+            entry["last_zone_free"] = current_zone_free
+            entry["zone_status"] = "ready"
+            if previous_zone_free == 0 and current_zone_free > 0:
+                send_telegram(
+                    cancellation_message(
+                        site_name,
+                        row,
+                        0,
+                        current_zone_free,
+                        zone_seats=preferred,
+                    )
+                )
+                alerts += 1
+                log(f"{site_name}: 선호 좌석 구역 빈자리 {current_zone_free}석 알림 완료")
+        elif previous is not None:
+            previous_free = as_int(previous.get("last_free"))
+            if previous_free == 0 and free > 0 and previous.get("ever_sold_out"):
+                send_telegram(
+                    cancellation_message(site_name, row, previous_free, free)
+                )
+                alerts += 1
+                log(f"{site_name}: 취소표 {free}석 알림 완료")
+
+        seat_state[key] = entry
+
+    state["seat_state"] = seat_state
+    return alerts
 
 
 def notify_new_rows(site_no, site_name, rows, state):
@@ -214,6 +362,7 @@ def discover_movie(session, state):
                     state["mov_no"] = str(rows[0].get("movNo", ""))
                     log(f"영화 코드 자동 발견: {state['mov_no']}")
                 notify_new_rows(site_no, site_name, rows, state)
+                track_cancellation_availability(session, site_no, site_name, rows, state)
                 log(f"{site_name} {display_date(play_date)}: 대상 회차 {len(rows)}개")
             except Exception as error:
                 log(f"{site_name} {display_date(play_date)}: 조회 실패 - {error}")
@@ -261,6 +410,7 @@ def monitor_all_open_dates(session, state):
         try:
             rows = fetch_rows(session, site_no, play_date, mov_no)
             notify_new_rows(site_no, site_name, rows, state)
+            track_cancellation_availability(session, site_no, site_name, rows, state)
             log(f"{site_name} {display_date(play_date)}: 대상 회차 {len(rows)}개")
         except Exception as error:
             log(f"{site_name} {display_date(play_date)}: 시간표 조회 실패 - {error}")
