@@ -23,7 +23,7 @@ OPEN_DATE_INTERVAL = int(os.environ.get("OPEN_DATE_INTERVAL_SECONDS", "60"))
 SOLD_OUT_INTERVAL = int(os.environ.get("SOLD_OUT_INTERVAL_SECONDS", "20"))
 REGULAR_INTERVAL = int(os.environ.get("REGULAR_INTERVAL_SECONDS", "60"))
 FAILED_RETRY_INTERVAL = int(os.environ.get("FAILED_RETRY_INTERVAL_SECONDS", "60"))
-GLOBAL_BLOCK_COOLDOWN = int(os.environ.get("GLOBAL_BLOCK_COOLDOWN_SECONDS", "60"))
+SITE_BLOCK_COOLDOWN = int(os.environ.get("SITE_BLOCK_COOLDOWN_SECONDS", "60"))
 REQUEST_JITTER_MIN = float(os.environ.get("REQUEST_JITTER_MIN_SECONDS", "1"))
 REQUEST_JITTER_MAX = float(os.environ.get("REQUEST_JITTER_MAX_SECONDS", "2"))
 BLOCK_BACKOFFS = (5, 15)
@@ -61,7 +61,6 @@ CONFIGURED_INTERVAL = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
 INTERVAL = min(CONFIGURED_INTERVAL, max(10, SOLD_OUT_INTERVAL))
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "340"))
 _LAST_API_REQUEST_AT = 0.0
-_CGV_BLOCKED_UNTIL = 0.0
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -100,6 +99,7 @@ def default_state():
         "seat_state": {},
         "open_date_poll": {},
         "showtime_poll": {},
+        "site_blocked_until": {},
     }
 
 
@@ -122,10 +122,6 @@ def save_state(state):
 
 def pace_api_request():
     global _LAST_API_REQUEST_AT
-    blocked_wait = _CGV_BLOCKED_UNTIL - time.monotonic()
-    if blocked_wait > 0:
-        log(f"CGV 전체 요청 보호 대기: {blocked_wait:.0f}초")
-        time.sleep(blocked_wait)
     if _LAST_API_REQUEST_AT:
         minimum_gap = random.uniform(REQUEST_JITTER_MIN, REQUEST_JITTER_MAX)
         elapsed = time.monotonic() - _LAST_API_REQUEST_AT
@@ -135,7 +131,6 @@ def pace_api_request():
 
 
 def api_get(session, path, params, tries=3):
-    global _CGV_BLOCKED_UNTIL
     last_error = None
     for attempt in range(tries):
         try:
@@ -158,9 +153,6 @@ def api_get(session, path, params, tries=3):
                 if is_blocked:
                     log(f"CGV 요청 차단됨: {delay}초 후 재시도")
                 time.sleep(delay)
-            elif is_blocked:
-                _CGV_BLOCKED_UNTIL = time.monotonic() + GLOBAL_BLOCK_COOLDOWN
-                log(f"CGV 차단 지속: 전체 요청을 {GLOBAL_BLOCK_COOLDOWN}초 동안 쉽니다")
     raise last_error
 
 
@@ -242,6 +234,18 @@ def pair_has_sold_out_show(state, site_no, play_date):
         if as_int((entry or {}).get("last_free")) == 0:
             return True
     return False
+
+
+def site_is_cooling_down(state, site_no, now=None):
+    now = time.time() if now is None else now
+    until = float(state.get("site_blocked_until", {}).get(site_no, 0) or 0)
+    return until > now
+
+
+def cool_down_site(state, site_no, site_name):
+    blocked = state.setdefault("site_blocked_until", {})
+    blocked[site_no] = time.time() + SITE_BLOCK_COOLDOWN
+    log(f"{site_name}: 이 지점만 {SITE_BLOCK_COOLDOWN}초 동안 쉬고 다른 지점은 계속 조회")
 
 
 def load_seat_provider():
@@ -419,6 +423,8 @@ def discover_movie(session, state):
 
     for play_date in dates:
         for site_no, site_name in SITES:
+            if site_is_cooling_down(state, site_no):
+                continue
             try:
                 rows = fetch_rows(session, site_no, play_date)
                 if rows and not state.get("mov_no"):
@@ -429,6 +435,8 @@ def discover_movie(session, state):
                 log(f"{site_name} {display_date(play_date)}: 대상 회차 {len(rows)}개")
             except Exception as error:
                 log(f"{site_name} {display_date(play_date)}: 조회 실패 - {error}")
+                if "403" in str(error):
+                    cool_down_site(state, site_no, site_name)
 
     state["discovery_offset"] = 1 if offset >= DISCOVERY_DAYS else offset + 1
     save_state(state)
@@ -446,6 +454,8 @@ def monitor_all_open_dates(session, state):
 
     date_candidates = []
     for site_no, site_name in SITES:
+        if site_is_cooling_down(state, site_no, now):
+            continue
         poll = open_date_poll.get(site_no, {})
         if poll_record_due(poll, OPEN_DATE_INTERVAL, now):
             last_attempt = float(poll.get("last_attempt", 0) or 0)
@@ -466,6 +476,8 @@ def monitor_all_open_dates(session, state):
         except Exception as error:
             current[site_no] = previous.get(site_no, [])
             log(f"{site_name}: 날짜 목록 조회 실패 - {error}")
+            if "403" in str(error):
+                cool_down_site(state, site_no, site_name)
             open_date_poll[site_no] = {
                 "last_attempt": time.time(),
                 "last_ok": False,
@@ -476,6 +488,8 @@ def monitor_all_open_dates(session, state):
     showtime_poll = state.setdefault("showtime_poll", {})
     urgent_keys = {pair_key(site_no, day) for site_no, _, day in urgent_pairs}
     for site_no, dates in current.items():
+        if site_is_cooling_down(state, site_no):
+            continue
         for play_date in dates:
             key = pair_key(site_no, play_date)
             sold_out = pair_has_sold_out_show(state, site_no, play_date)
@@ -494,6 +508,8 @@ def monitor_all_open_dates(session, state):
     ]
 
     for site_no, site_name, play_date in chosen:
+        if site_is_cooling_down(state, site_no):
+            continue
         key = pair_key(site_no, play_date)
         try:
             rows = fetch_rows(session, site_no, play_date, mov_no)
@@ -506,6 +522,8 @@ def monitor_all_open_dates(session, state):
             }
         except Exception as error:
             log(f"{site_name} {display_date(play_date)}: 시간표 조회 실패 - {error}")
+            if "403" in str(error):
+                cool_down_site(state, site_no, site_name)
             showtime_poll[key] = {
                 "last_attempt": time.time(),
                 "last_ok": False,
