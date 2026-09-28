@@ -24,6 +24,16 @@ SOLD_OUT_INTERVAL = int(os.environ.get("SOLD_OUT_INTERVAL_SECONDS", "20"))
 REGULAR_INTERVAL = int(os.environ.get("REGULAR_INTERVAL_SECONDS", "60"))
 FAILED_RETRY_INTERVAL = int(os.environ.get("FAILED_RETRY_INTERVAL_SECONDS", "60"))
 SITE_BLOCK_COOLDOWN = int(os.environ.get("SITE_BLOCK_COOLDOWN_SECONDS", "60"))
+PRIORITY_INTERVAL = int(os.environ.get("PRIORITY_INTERVAL_SECONDS", "10"))
+PRIORITY_OPEN_DATE_INTERVAL = int(
+    os.environ.get("PRIORITY_OPEN_DATE_INTERVAL_SECONDS", "20")
+)
+PRIORITY_FAILED_RETRY_INTERVAL = int(
+    os.environ.get("PRIORITY_FAILED_RETRY_INTERVAL_SECONDS", "30")
+)
+PRIORITY_SITE_BLOCK_COOLDOWN = int(
+    os.environ.get("PRIORITY_SITE_BLOCK_COOLDOWN_SECONDS", "30")
+)
 REQUEST_JITTER_MIN = float(os.environ.get("REQUEST_JITTER_MIN_SECONDS", "1"))
 REQUEST_JITTER_MAX = float(os.environ.get("REQUEST_JITTER_MAX_SECONDS", "2"))
 BLOCK_BACKOFFS = (5, 15)
@@ -54,11 +64,21 @@ SITES = [
     ("0056", "강남"),
     ("0191", "홍대"),
 ]
+PRIORITY_SITE_NOS = {
+    item.strip()
+    for item in os.environ.get("PRIORITY_SITE_NOS", "0013,0059,0191").split(",")
+    if item.strip()
+}
+PRIORITY_DATES = {
+    item.strip().replace("-", "")
+    for item in os.environ.get("PRIORITY_DATES", "20261003,20261004").split(",")
+    if item.strip()
+}
 STATE_FILE = Path(__file__).with_name("state.json")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 CONFIGURED_INTERVAL = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
-INTERVAL = min(CONFIGURED_INTERVAL, max(10, SOLD_OUT_INTERVAL))
+INTERVAL = min(CONFIGURED_INTERVAL, max(2, PRIORITY_INTERVAL // 3))
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "340"))
 _LAST_API_REQUEST_AT = 0.0
 
@@ -213,16 +233,25 @@ def cancellation_filter_matches(site_no, row):
     return True
 
 
-def poll_record_due(record, success_interval, now):
+def poll_record_due(
+    record,
+    success_interval,
+    now,
+    failure_interval=FAILED_RETRY_INTERVAL,
+):
     last_attempt = float((record or {}).get("last_attempt", 0) or 0)
     if not last_attempt:
         return True
-    interval = success_interval if (record or {}).get("last_ok", True) else FAILED_RETRY_INTERVAL
+    interval = success_interval if (record or {}).get("last_ok", True) else failure_interval
     return now - last_attempt >= interval
 
 
 def pair_key(site_no, play_date):
     return f"{site_no}:{play_date}"
+
+
+def is_priority_pair(site_no, play_date):
+    return site_no in PRIORITY_SITE_NOS and play_date in PRIORITY_DATES
 
 
 def pair_has_sold_out_show(state, site_no, play_date):
@@ -243,9 +272,14 @@ def site_is_cooling_down(state, site_no, now=None):
 
 
 def cool_down_site(state, site_no, site_name):
+    cooldown = (
+        PRIORITY_SITE_BLOCK_COOLDOWN
+        if site_no in PRIORITY_SITE_NOS
+        else SITE_BLOCK_COOLDOWN
+    )
     blocked = state.setdefault("site_blocked_until", {})
-    blocked[site_no] = time.time() + SITE_BLOCK_COOLDOWN
-    log(f"{site_name}: 이 지점만 {SITE_BLOCK_COOLDOWN}초 동안 쉬고 다른 지점은 계속 조회")
+    blocked[site_no] = time.time() + cooldown
+    log(f"{site_name}: 이 지점만 {cooldown}초 동안 쉬고 다른 지점은 계속 조회")
 
 
 def load_seat_provider():
@@ -285,8 +319,8 @@ def send_telegram(text):
             "text": text,
             "disable_web_page_preview": True,
             "reply_markup": {"inline_keyboard": [[{
-                "text": "📱 CGV 앱으로 열기",
-                "url": "https://cgv.co.kr/mShrtU/fP2Qw",
+                "text": "🎟 CGV에서 예매하기",
+                "url": "https://cgv.co.kr/cnm/movieBook/cinema",
             }]]},
         },
         timeout=20,
@@ -457,12 +491,21 @@ def monitor_all_open_dates(session, state):
         if site_is_cooling_down(state, site_no, now):
             continue
         poll = open_date_poll.get(site_no, {})
-        if poll_record_due(poll, OPEN_DATE_INTERVAL, now):
+        priority_site = site_no in PRIORITY_SITE_NOS
+        success_interval = (
+            PRIORITY_OPEN_DATE_INTERVAL if priority_site else OPEN_DATE_INTERVAL
+        )
+        failure_interval = (
+            PRIORITY_FAILED_RETRY_INTERVAL if priority_site else FAILED_RETRY_INTERVAL
+        )
+        if poll_record_due(poll, success_interval, now, failure_interval):
             last_attempt = float(poll.get("last_attempt", 0) or 0)
-            date_candidates.append((last_attempt, site_no, site_name))
+            date_candidates.append(
+                (0 if priority_site else 1, last_attempt, site_no, site_name)
+            )
 
     date_candidates.sort()
-    for _, site_no, site_name in date_candidates[:MAX_OPEN_DATE_REQUESTS]:
+    for _, _, site_no, site_name in date_candidates[:MAX_OPEN_DATE_REQUESTS]:
         try:
             dates = fetch_open_dates(session, site_no, mov_no)
             current[site_no] = dates
@@ -493,12 +536,26 @@ def monitor_all_open_dates(session, state):
         for play_date in dates:
             key = pair_key(site_no, play_date)
             sold_out = pair_has_sold_out_show(state, site_no, play_date)
-            interval = SOLD_OUT_INTERVAL if sold_out else REGULAR_INTERVAL
+            priority_pair = is_priority_pair(site_no, play_date)
+            if priority_pair:
+                interval = PRIORITY_INTERVAL
+                failure_interval = PRIORITY_FAILED_RETRY_INTERVAL
+                rank = 0
+            elif sold_out:
+                interval = SOLD_OUT_INTERVAL
+                failure_interval = FAILED_RETRY_INTERVAL
+                rank = 1
+            else:
+                interval = REGULAR_INTERVAL
+                failure_interval = FAILED_RETRY_INTERVAL
+                rank = 2
             poll = showtime_poll.get(key, {})
-            if key in urgent_keys or poll_record_due(poll, interval, now):
+            if key in urgent_keys or poll_record_due(
+                poll, interval, now, failure_interval
+            ):
                 last_attempt = float(poll.get("last_attempt", 0) or 0)
                 candidates.append(
-                    (0 if sold_out else 1, last_attempt, play_date, site_no, site_names[site_no])
+                    (rank, last_attempt, play_date, site_no, site_names[site_no])
                 )
 
     candidates.sort()
@@ -554,6 +611,13 @@ def main():
         "스마트 감시 시작: "
         f"매진 회차 {SOLD_OUT_INTERVAL}초, 일반 회차 {REGULAR_INTERVAL}초, "
         f"새 날짜 탐색 {OPEN_DATE_INTERVAL}초 간격"
+    )
+    priority_names = [name for site_no, name in SITES if site_no in PRIORITY_SITE_NOS]
+    log(
+        "최우선 감시: "
+        f"{', '.join(priority_names)} · "
+        f"{', '.join(display_date(day) for day in sorted(PRIORITY_DATES))} · "
+        f"약 {PRIORITY_INTERVAL}초 간격"
     )
     once = "--once" in sys.argv
     deadline = time.monotonic() + LOOP_MINUTES * 60
