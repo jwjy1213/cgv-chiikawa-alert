@@ -6,6 +6,7 @@ GitHub Actions에서 1분마다 CGV의 2026-09-30 시간표를 확인하고 새 
 - 지점: 용산아이파크몰, 구로, 영등포타임스퀘어, 강남, 홍대
 - 모든 상영관
 - 새 회차만 알림
+- 알림 버튼은 치이카와 영화의 CGV 공유 링크를 통해 CGV 앱 실행을 시도
 
 민감한 값은 저장소의 Settings → Secrets and variables → Actions에 등록합니다.
 
