@@ -319,8 +319,8 @@ def send_telegram(text):
             "text": text,
             "disable_web_page_preview": True,
             "reply_markup": {"inline_keyboard": [[{
-                "text": "🎟 CGV에서 예매하기",
-                "url": "https://cgv.co.kr/cnm/movieBook/cinema",
+                "text": "📱 CGV 앱으로 열기",
+                "url": "https://cgv.co.kr/mShrtU/fP2Qw",
             }]]},
         },
         timeout=20,
