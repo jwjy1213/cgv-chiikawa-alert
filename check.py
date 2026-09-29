@@ -538,17 +538,17 @@ def monitor_all_open_dates(session, state):
             sold_out = pair_has_sold_out_show(state, site_no, play_date)
             priority_pair = is_priority_pair(site_no, play_date)
             if priority_pair:
-            interval = PRIORITY_INTERVAL
-            failure_interval = PRIORITY_FAILED_RETRY_INTERVAL
-            rank = 0
-        elif sold_out:
-            interval = SOLD_OUT_INTERVAL
-            failure_interval = FAILED_RETRY_INTERVAL
-            rank = 1
-        else:
-            interval = REGULAR_INTERVAL
-            failure_interval = FAILED_RETRY_INTERVAL
-            rank = 2
+                interval = PRIORITY_INTERVAL
+                failure_interval = PRIORITY_FAILED_RETRY_INTERVAL
+                rank = 0
+            elif sold_out:
+                interval = SOLD_OUT_INTERVAL
+                failure_interval = FAILED_RETRY_INTERVAL
+                rank = 1
+            else:
+                interval = REGULAR_INTERVAL
+                failure_interval = FAILED_RETRY_INTERVAL
+                rank = 2
             poll = showtime_poll.get(key, {})
             if key in urgent_keys or poll_record_due(
                 poll, interval, now, failure_interval
