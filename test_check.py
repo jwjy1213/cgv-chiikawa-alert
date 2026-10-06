@@ -90,6 +90,19 @@ class GlobalBlockTests(unittest.TestCase):
         send.assert_called_once()
         self.assertIn("복구", send.call_args.args[0])
 
+    def test_new_runner_clears_cooldown_but_preserves_outage_alert(self):
+        self.state["global_block"] = {
+            "count": 8,
+            "until": 9999999999,
+            "alerted": True,
+        }
+
+        result = check.prepare_runtime_state(self.state)
+
+        self.assertEqual(result["global_block"]["count"], 0)
+        self.assertEqual(result["global_block"]["until"], 0)
+        self.assertTrue(result["global_block"]["alerted"])
+
 
 if __name__ == "__main__":
     unittest.main()

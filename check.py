@@ -149,6 +149,16 @@ def load_state():
         return state
 
 
+def prepare_runtime_state(state):
+    previous = dict(state.get("global_block") or {})
+    state["global_block"] = {
+        "count": 0,
+        "until": 0,
+        "alerted": bool(previous.get("alerted", False)),
+    }
+    return state
+
+
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -375,10 +385,10 @@ def register_global_block(state):
 def register_cgv_success(state):
     block = dict(state.get("global_block") or {})
     count = int(block.get("count", 0) or 0)
-    if not count:
+    was_alerted = bool(block.get("alerted", False))
+    if not count and not was_alerted:
         return
 
-    was_alerted = bool(block.get("alerted", False))
     state["global_block"] = {
         "count": 0,
         "until": 0,
@@ -667,7 +677,7 @@ def check_once(session, state):
 
 
 def main():
-    state = load_state()
+    state = prepare_runtime_state(load_state())
     session = requests.Session(impersonate="chrome")
     if "--test-alert" in sys.argv:
         send_telegram("✅ GitHub Actions CGV 알림 연결 테스트 성공")

@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "7,22,37,52 * * * *"
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 14
 
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,7 @@ jobs:
           GLOBAL_BLOCK_ALERT_THRESHOLD: "2"
           MAX_SHOWTIME_REQUESTS: "1"
           MAX_OPEN_DATE_REQUESTS: "1"
-          LOOP_MINUTES: "325"
+          LOOP_MINUTES: "12"
         run: |
           if [ "${{ inputs.test_alert }}" = "true" ]; then
             python check.py --test-alert
@@ -69,13 +69,13 @@ jobs:
           fi
 
       - name: 감시 중단 텔레그램 알림
-        if: ${{ (failure() || cancelled()) && inputs.test_alert != true }}
+        if: ${{ failure() && inputs.test_alert != true }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MESSAGE: |-
-            🚨 CGV 감시가 중단되었습니다. 아래 실행 기록을 확인해주세요.
+            🚨 CGV 감시 실행이 오류로 실패했습니다. 아래 실행 기록을 확인해주세요.
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl --fail --silent --show-error \
