@@ -8,19 +8,19 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "17 * * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: cgv-chiikawa-watcher
-  cancel-in-progress: false
+  group: cgv-chiikawa-${{ inputs.test_alert == true && 'test' || 'watch' }}
+  cancel-in-progress: true
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 340
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +33,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: 이전 알림 기록 복원
+        if: ${{ inputs.test_alert != true }}
         uses: actions/cache@v4
         with:
           path: state.json
@@ -44,18 +45,22 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHECK_INTERVAL_SECONDS: "10"
+          CHECK_INTERVAL_SECONDS: "60"
           PRIORITY_SITE_NOS: "0013,0059,0191"
-          PRIORITY_DATES: "20261003,20261004"
-          PRIORITY_INTERVAL_SECONDS: "10"
-          PRIORITY_OPEN_DATE_INTERVAL_SECONDS: "20"
-          SOLD_OUT_INTERVAL_SECONDS: "10"
-          REGULAR_INTERVAL_SECONDS: "30"
-          OPEN_DATE_INTERVAL_SECONDS: "30"
-          FAILED_RETRY_INTERVAL_SECONDS: "30"
-          MAX_SHOWTIME_REQUESTS: "12"
-          MAX_OPEN_DATE_REQUESTS: "3"
-          LOOP_MINUTES: "340"
+          PRIORITY_DATES: ""
+          PRIORITY_INTERVAL_SECONDS: "60"
+          PRIORITY_OPEN_DATE_INTERVAL_SECONDS: "120"
+          SOLD_OUT_INTERVAL_SECONDS: "60"
+          REGULAR_INTERVAL_SECONDS: "180"
+          OPEN_DATE_INTERVAL_SECONDS: "180"
+          FAILED_RETRY_INTERVAL_SECONDS: "300"
+          REQUEST_JITTER_MIN_SECONDS: "5"
+          REQUEST_JITTER_MAX_SECONDS: "8"
+          GLOBAL_BLOCK_BACKOFF_SECONDS: "300,900,3600"
+          GLOBAL_BLOCK_ALERT_THRESHOLD: "2"
+          MAX_SHOWTIME_REQUESTS: "1"
+          MAX_OPEN_DATE_REQUESTS: "1"
+          LOOP_MINUTES: "325"
         run: |
           if [ "${{ inputs.test_alert }}" = "true" ]; then
             python check.py --test-alert
